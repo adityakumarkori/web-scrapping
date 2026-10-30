@@ -835,5 +835,16 @@ def main() -> None:
         _render_excel_export(connected)
 
 
+def _render_excel_export(connected: bool) -> None:
+    """Render the Excel Export page."""
+    st.subheader("Excel Export")
+    st.caption("Export product data to Excel format.")
+
+    if not connected:
+        st.error("MongoDB is unavailable. Export requires a MongoDB connection.")
+    else:
+        st.info("Excel export functionality comes in a later phase.")
+
+
 if __name__ == "__main__":
     main()

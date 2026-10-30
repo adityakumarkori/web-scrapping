@@ -150,7 +150,7 @@ def _create_indexes(database: Any) -> None:
 
     # --- dataset_quality_reports ---
     database[COLLECTION_DATASET_QUALITY_REPORTS].create_index(
-        ["generated_at", DESCENDING]
+        [("generated_at", DESCENDING)]
     )
     database[COLLECTION_DATASET_QUALITY_REPORTS].create_index("run_id")
 
