@@ -10,6 +10,7 @@ collection structure. Full scraping and Excel export come in later phases.
 
 from typing import Optional
 
+import json
 import streamlit as st
 
 from config import settings
@@ -38,6 +39,7 @@ PAGES = [
     "Data Sources",
     "Products",
     "Database",
+    "Data Quality",
     "Excel Export",
 ]
 
@@ -434,6 +436,163 @@ def _render_database(connected: bool) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Data Quality
+# ---------------------------------------------------------------------------
+def _render_data_quality(connected: bool) -> None:
+    """Render the Data Quality page for assessing product record quality."""
+
+    from services.pipeline import run_pipeline
+
+    # Initialize session state for holding product data
+    if "quality_products" not in st.session_state:
+        st.session_state["quality_products"] = []
+
+    # --- Product input section ---
+    st.markdown("### Upload / Paste Product Records")
+    st.markdown(
+        "Paste product records as JSON (one per line) or upload a file. "
+        "Each record should follow the GRANIT EU product schema."
+    )
+
+    uploaded_file = st.file_uploader(
+        "Upload JSON file with product records", type=["json"], accept_multiple_files=False
+    )
+    manual_json = st.text_area(
+        "Or paste JSON records (one per line):",
+        height=200,
+        help="Each line should be a valid product JSON object.",
+    )
+
+    products: List[Dict[str, Any]] = []
+
+    if uploaded_file is not None:
+        try:
+            products = json.load(uploaded_file)
+            st.success(f"Loaded {len(products)} records from file.")
+        except Exception as exc:
+            st.error(f"Failed to parse JSON file: {exc}")
+
+    if manual_json.strip():
+        try:
+            records = [json.loads(line) for line in manual_json.strip().splitlines() if line.strip()]
+            products.extend(records)
+            st.info(f"Added {len(records)} records from text input.")
+        except json.JSONDecodeError as exc:
+            st.error(f"Failed to parse JSON text: {exc}")
+
+    if not products and not st.session_state["quality_products"]:
+        st.info("No product records loaded. Please upload a file or paste JSON records.")
+    else:
+        # Combine loaded products with previously loaded ones
+        if st.session_state["quality_products"]:
+            all_products = st.session_state["quality_products"] + products
+        else:
+            all_products = products
+
+        # Run pipeline
+        if st.button("Run Quality Assessment", key="run_quality_assessment"):
+            with st.spinner("Running pipeline cleaning → validation → deduplication → quality report..."):
+                result = run_pipeline(all_products)
+
+            # Store results in session state for display
+            st.session_state["quality_result"] = result
+            st.session_state["quality_products"] = all_products
+            st.rerun()
+
+        # Display results if available
+        result = st.session_state.get("quality_result")
+        if result:
+            # Quality summary
+            sq = result.quality_summary
+            st.markdown("### Dataset Quality Summary")
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                st.metric("Total Records", sq["total_records"])
+            with c2:
+                st.metric("Valid Records", sq["valid_records"])
+            with c3:
+                st.metric("Invalid Records", sq["invalid_records"])
+
+            st.progress(sq["overall_quality_percentage"] / 100)
+            st.caption(f"Overall quality: {sq['overall_quality_percentage']}%")
+
+            # Quality distribution
+            st.markdown("#### Quality Distribution")
+            dist = sq["quality_distribution"]
+            d1, d2, d3 = st.columns(3)
+            with d1:
+                st.info(f"Complete: {dist['complete']}")
+            with d2:
+                st.info(f"Partial: {dist['partial']}")
+            with d3:
+                st.info(f"Incomplete: {dist['incomplete']}")
+
+            # Missing mandatory fields
+            st.markdown("#### Missing Mandatory Fields")
+            mm = sq["missing_mandatory_by_field"]
+            if any(mm.values()):
+                for field, count in mm.items():
+                    if count > 0:
+                        st.caption(f"- **{field}**: {count} records")
+            else:
+                st.success("All records have mandatory fields present.")
+
+            # Missing optional fields
+            st.markdown("#### Missing Optional Fields")
+            mo = sq["missing_optional_by_field"]
+            if any(mo.values()):
+                sorted_missing = sorted(mo.items(), key=lambda x: x[1], reverse=True)[:10]
+                for field, count in sorted_missing:
+                    st.caption(f"- **{field}**: {count} records")
+            else:
+                st.success("All records have optional fields filled (or none expected).")
+
+            # Duplicate groups
+            st.markdown("#### Duplicate Groups")
+            if result.duplicate_groups:
+                for g in result.duplicate_groups:
+                    st.warning(
+                        f"{g.duplicate_type}: `{g.key}` — {len(g.records)} records — {g.reason}"
+                    )
+            else:
+                st.success("No duplicate records detected.")
+
+            # Record-level scores
+            st.markdown("#### Per-Record Quality Scores")
+            scores = sq["record_scores"]
+            if scores:
+                avg_score = sum(scores) / len(scores)
+                st.caption(f"Average quality score: {avg_score:.2f}")
+                complete = sum(1 for s in scores if s >= 1.0)
+                partial = sum(1 for s in scores if 0.5 <= s < 1.0)
+                incomplete = sum(1 for s in scores if s < 0.5)
+                st.caption(f"Complete: {complete} | Partial: {partial} | Incomplete: {incomplete}")
+
+            # Rejected products summary
+            if result.rejected_products:
+                st.markdown("#### Rejected Products")
+                st.caption(f"{len(result.rejected_products)} records rejected due to validation errors:")
+                for item in result.rejected_products[:10]:
+                    with st.expander(f"Product: {item['product'].get('article_number', 'N/A')}"):
+                        for err in item["errors"][:3]:
+                            st.caption(f"  - {err}")
+                if len(result.rejected_products) > 10:
+                    st.caption(f"... and {len(result.rejected_products) - 10} more")
+
+            # Save button to keep products for later
+            if st.button("Save Current Products", key="save_quality_products"):
+                st.session_state["quality_products"] = all_products
+                st.success("Products saved to session state.")
+
+        # Button to clear and start fresh
+        if st.button("Clear and Start Fresh", key="clear_quality"):
+            for key in list(st.session_state.keys()):
+                if "quality" in key:
+                    del st.session_state[key]
+            st.rerun()
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main() -> None:
@@ -470,6 +629,8 @@ def main() -> None:
         _render_products(connected)
     elif page == "Database":
         _render_database(connected)
+    elif page == "Data Quality":
+        _render_data_quality(connected)
     elif page == "Excel Export":
         st.subheader("Excel Export")
         st.info("Excel export of up to 100 product records comes in Phase 2 / Phase 3.")
