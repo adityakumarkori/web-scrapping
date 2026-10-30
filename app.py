@@ -27,6 +27,8 @@ from services.source import (
     SourceService,
     validate_source_url,
 )
+from scraper.client import HttpClient
+from scraper.runner import ScrapingRunner
 
 setup_logging()
 logger = get_logger(__name__)
@@ -244,6 +246,103 @@ def _render_data_sources(connected: bool) -> None:
                         st.rerun()
                     except Exception as exc:  # noqa: BLE001
                         st.error(f"Failed to enable source: {exc}")
+
+    _render_extraction_controls(service)
+
+
+# ---------------------------------------------------------------------------
+# Extraction controls
+# ---------------------------------------------------------------------------
+def _render_extraction_controls(service: SourceService) -> None:
+    """Render extraction controls for eligible (approved + enabled) sources."""
+    st.markdown("---")
+    st.markdown("### Start extraction")
+
+    try:
+        sources = service.list_sources()
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Unable to list sources for extraction")
+        st.error(f"Unable to load sources: {exc}")
+        return
+
+    eligible_sources = [
+        s for s in sources if SourceService.is_eligible_for_extraction(s)
+    ]
+    if not eligible_sources:
+        st.info(
+            "No approved and enabled sources available for extraction. "
+            "Register a source and set its authorization to approved and "
+            "enable it before extracting."
+        )
+        return
+
+    source_options = {
+        f"{s.get('source_name', 'Unnamed')} ({s.get('source_id', '')[:8]})": s
+        for s in eligible_sources
+    }
+    selected_label = st.selectbox("Select an approved source", options=list(source_options.keys()))
+    selected_source = source_options[selected_label]
+
+    st.text(f"Source URL: {selected_source.get('source_url', '-')}")
+
+    default_url = selected_source.get("source_url", "")
+    start_url = st.text_input(
+        "Starting product or catalogue URL",
+        value=default_url,
+        help="Must belong to the approved source domain.",
+    )
+    max_records = st.number_input(
+        "Maximum records",
+        min_value=1,
+        max_value=100,
+        value=min(100, settings.max_product_records),
+        step=1,
+    )
+
+    if st.button("Start extraction", key=f"extract_{selected_source.get('source_id')}"):
+        if not start_url:
+            st.error("Please enter a starting URL.")
+            return
+        try:
+            runner = ScrapingRunner(source_service=service)
+            with st.spinner("Extracting products..."):
+                result = runner.run(
+                    source_id=selected_source.get("source_id"),
+                    start_url=start_url,
+                    max_records=int(max_records),
+                )
+            st.session_state["extraction_result"] = result
+            st.rerun()
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Extraction failed")
+            st.error(f"Extraction failed: {exc}")
+
+    result = st.session_state.get("extraction_result")
+    if result:
+        st.markdown("#### Extraction result")
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            st.metric("Status", result.status)
+        with c2:
+            st.metric("Found", result.records_found)
+        with c3:
+            st.metric("Extracted", result.records_extracted)
+        with c4:
+            st.metric("Skipped / Failed", result.records_skipped + result.records_failed)
+
+        if result.errors:
+            st.markdown("**Errors / skipped:**")
+            for err in result.errors[:20]:
+                st.caption(f"- {err}")
+
+        if result.products:
+            st.markdown(f"**Sample products ({min(5, len(result.products))}):**")
+            for p in result.products[:5]:
+                st.caption(f"- {p.article_number}: {p.product_name} ({p.data_origin})")
+
+        if st.button("Clear result", key="clear_extraction_result"):
+            st.session_state.pop("extraction_result", None)
+            st.rerun()
 
 
 # ---------------------------------------------------------------------------

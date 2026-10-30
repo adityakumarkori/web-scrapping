@@ -191,6 +191,12 @@ class Product(BaseModel):
     shipping_method: Optional[str] = Field(default=None, description="Shipping method")
     delivery_days: Optional[int] = Field(default=None, description="Delivery days")
 
+    # Top-level price (single-market offer; regional prices live in regional_data).
+    price: Optional[Decimal] = Field(default=None, description="Product price")
+    currency: Optional[str] = Field(
+        default=None, min_length=3, max_length=3, description="ISO 4217 currency code"
+    )
+
     # --- Regional data (multiple EU country entries) ---
     regional_data: Optional[List[RegionalDataEntry]] = Field(
         default=None, description="Country-specific commercial records"
@@ -254,6 +260,25 @@ class Product(BaseModel):
     def _validate_non_negative_int(cls, value: Optional[int]) -> Optional[int]:
         if value is not None and value < 0:
             raise ValueError("quantity must be non-negative")
+        return value
+
+    @field_validator("price", mode="before")
+    @classmethod
+    def _coerce_price(cls, value: Any) -> Optional[Decimal]:
+        return _to_decimal(value)
+
+    @field_validator("price")
+    @classmethod
+    def _validate_price_non_negative(cls, value: Optional[Decimal]) -> Optional[Decimal]:
+        if value is not None and value < 0:
+            raise ValueError("price must be non-negative")
+        return value
+
+    @field_validator("currency")
+    @classmethod
+    def _validate_currency_code(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and not re.fullmatch(r"[A-Z]{3}", value):
+            raise ValueError("currency must be a 3-letter uppercase ISO 4217 code")
         return value
 
     @model_validator(mode="after")
