@@ -85,8 +85,7 @@ class MongoDBManager:
         """
         if self._database is None:
             return
-        self._database[COLLECTION_PRODUCTS].create_index("article_number")
-        self._database[COLLECTION_SCRAPING_RUNS].create_index("run_id")
+        initialize_collections(self._database)
 
     def is_connected(self) -> bool:
         """Return ``True`` if a live connection is held."""
@@ -120,6 +119,30 @@ class MongoDBManager:
             self._database = None
             self._connected = False
             logger.info("MongoDB connection closed")
+
+
+def initialize_collections(database) -> None:
+    """Initialize all collections with non-unique indexes.
+
+    Creates the products, data_sources and scraping_runs collections and
+    adds indexes appropriate to each. No uniqueness constraints that would
+    prevent multiple source records or regional prices are created.
+
+    Indexes:
+        products: article_number, ean_gtin, category
+        data_sources: source_name, source_url
+        scraping_runs: run_id, source_id, status
+    """
+    database[COLLECTION_PRODUCTS].create_index("article_number")
+    database[COLLECTION_PRODUCTS].create_index("ean_gtin")
+    database[COLLECTION_PRODUCTS].create_index("category")
+
+    database[COLLECTION_DATA_SOURCES].create_index("source_name")
+    database[COLLECTION_DATA_SOURCES].create_index("source_url")
+
+    database[COLLECTION_SCRAPING_RUNS].create_index("run_id")
+    database[COLLECTION_SCRAPING_RUNS].create_index("source_id")
+    database[COLLECTION_SCRAPING_RUNS].create_index("status")
 
 
 # Module-level singleton shared across the application.
