@@ -73,30 +73,230 @@ def _get_source_service() -> Optional[SourceService]:
 def _render_dashboard(connected: bool) -> None:
     st.subheader("Dashboard")
 
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("Application", settings.app_name)
-    with col2:
-        status = "Connected" if connected else "Disconnected"
-        st.metric("MongoDB", status)
-    with col3:
-        product_count = None
-        if connected:
-            try:
-                product_count = mongodb.get_collection(COLLECTION_PRODUCTS).estimated_document_count()
-            except (DatabaseConnectionError, Exception) as exc:  # noqa: BLE001
-                logger.warning("Unable to fetch product count: %s", exc)
-        st.metric("Products", product_count if product_count is not None else "N/A")
+    # Initialize data structures
+    product_count = 0
+    verified_count = 0
+    synthetic_count = 0
+    data_sources_count = 0
+    approved_sources_count = 0
+    scraping_runs_count = 0
+    rejected_count = 0
+    avg_quality_score = 0.0
 
     if connected:
-        st.success("MongoDB connection is active.")
-    else:
-        st.error(
-            "MongoDB is unavailable. The application continues to run in offline "
-            "mode. Connect a MongoDB instance to store product data."
-        )
+        try:
+            # Product counts
+            products_coll = mongodb.get_collection(COLLECTION_PRODUCTS)
+            product_count = products_coll.estimated_document_count()
 
-    st.info("Product count placeholder - full product management comes in Phase 2.")
+            # Verified vs synthetic
+            pipeline = [
+                {"$match": {"verification_status": "verified"}},
+                {"$count": "total"},
+            ]
+            verified_result = list(products_coll.aggregate(pipeline))
+            verified_count = verified_result[0]["total"] if verified_result else 0
+
+            pipeline2 = [
+                {"$match": {"is_synthetic": True}},
+                {"$count": "total"},
+            ]
+            synthetic_result = list(products_coll.aggregate(pipeline2))
+            synthetic_count = synthetic_result[0]["total"] if synthetic_result else 0
+
+            # Data sources
+            sources_coll = mongodb.get_collection(COLLECTION_DATA_SOURCES)
+            data_sources_count = sources_coll.estimated_document_count()
+
+            pipeline3 = [{"$match": {"authorization_status": "approved"}}]
+            approved_result = list(sources_coll.aggregate(pipeline3))
+            approved_sources_count = len(approved_result)
+
+            # Scraping runs
+            runs_coll = mongodb.get_collection(COLLECTION_SCRAPING_RUNS)
+            scraping_runs_count = runs_coll.estimated_document_count()
+
+            # Rejected products
+            rejected_coll = mongodb.get_collection(COLLECTION_REJECTED_PRODUCTS)
+            rejected_count = rejected_coll.estimated_document_count()
+
+            # Average quality score (from quality reports if available, otherwise estimate)
+            # For now, use a simple estimation based on record completeness
+            if product_count > 0:
+                # Simple estimation: count records with regional_data and verification_status
+                quality_pipeline = [
+                    {
+                        "$project": {
+                            "has_regional": {"$gt": [{"$size": "$regional_data"}, 0]},
+                            "is_verified": {"$eq": ["$verification_status", "verified"]},
+                        }
+                    }
+                ]
+                quality_result = list(products_coll.aggregate(quality_pipeline))
+                complete = sum(1 for r in quality_result if r.get("has_regional") and r.get("is_verified"))
+                partial = sum(1 for r in quality_result if r.get("has_regional") and not r.get("is_verified"))
+                incomplete = sum(1 for r in quality_result if not r.get("has_regional"))
+                total_scored = complete + partial + incomplete
+                if total_scored > 0:
+                    avg_quality_score = round((complete * 1.0 + partial * 0.5) / total_scored * 100, 1)
+                else:
+                    avg_quality_score = 0.0
+
+            # Recent activity counts (last 7 days approximation)
+            # ... (could be expanded with date filtering)
+
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Unable to fetch dashboard statistics: %s", exc)
+
+    # KPI Cards
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Total Products", product_count)
+    with col2:
+        st.metric("Verified Products", verified_count)
+    with col3:
+        st.metric("Synthetic Products", synthetic_count)
+    with col4:
+        st.metric("Data Sources", data_sources_count)
+
+    col5, col6, col7, col8 = st.columns(4)
+    with col5:
+        st.metric("Approved Sources", approved_sources_count)
+    with col6:
+        st.metric("Scraping Runs", scraping_runs_count)
+    with col7:
+        st.metric("Rejected Products", rejected_count)
+    with col8:
+        st.metric("Avg Data Quality Score", f"{avg_quality_score}%")
+
+    st.markdown("---")
+
+    # Visualizations row
+    if connected:
+        st.markdown("### Visualizations")
+        viz_col1, viz_col2 = st.columns(2)
+
+        # Products by category (simple bar chart data)
+        with viz_col1:
+            st.markdown("#### Products by Category")
+            try:
+                cat_pipeline = [
+                    {"$group": {"_id": "$category", "count": {"$sum": 1}}},
+                    {"$sort": {"count": -1}},
+                    {"$limit": 10},
+                ]
+                cat_results = list(products_coll.aggregate(cat_pipeline))
+                if cat_results:
+                    categories = [r["_id"] or "Uncategorized" for r in cat_results]
+                    counts = [r["count"] for r in cat_results]
+                    st.bar_chart({"category": categories, "count": counts})
+                else:
+                    st.info("No category data available")
+            except Exception:
+                st.info("Unable to load category distribution")
+
+        # Verification status distribution
+        with viz_col2:
+            st.markdown("#### Verification Status Distribution")
+            try:
+                status_pipeline = [
+                    {"$group": {"_id": "$verification_status", "count": {"$sum": 1}}},
+                ]
+                status_results = list(products_coll.aggregate(status_pipeline))
+                if status_results:
+                    status_data = {}
+                    for r in status_results:
+                        status_data[r["_id"]] = r["count"]
+                    st.bar_chart(status_data)
+                else:
+                    st.info("No verification data available")
+            except Exception:
+                st.info("Unable to load verification distribution")
+
+        # Products by manufacturer (top 10)
+        with viz_col1:
+            st.markdown("#### Top Manufacturers")
+            try:
+                manu_pipeline = [
+                    {"$group": {"_id": "$manufacturer", "count": {"$sum": 1}}},
+                    {"$sort": {"count": -1}},
+                    {"$limit": 10},
+                ]
+                manu_results = list(products_coll.aggregate(manu_pipeline))
+                if manu_results:
+                    manufacturers = [r["_id"] or "Unknown" for r in manu_results]
+                    counts = [r["count"] for r in manu_results]
+                    st.bar_chart(
+                        {"manufacturer": manufacturers, "count": counts},
+                        use_container_width=True,
+                    )
+                else:
+                    st.info("No manufacturer data available")
+            except Exception:
+                st.info("Unable to load manufacturer data")
+
+        # Data quality distribution
+        with viz_col2:
+            st.markdown("#### Data Quality Distribution")
+            try:
+                # Use the existing quality summary approach
+                quality_results = {
+                    "Complete": max(verified_count - synthetic_count, 0),
+                    "Partial": synthetic_count,
+                    "Incomplete": product_count - verified_count - synthetic_count + max(verified_count - synthetic_count, 0),
+                }
+                # Filter out zero values
+                quality_data = {k: v for k, v in quality_results.items() if v > 0}
+                if quality_data:
+                    st.bar_chart(quality_data)
+                else:
+                    st.info("No quality data available")
+            except Exception:
+                st.info("Unable to load quality distribution")
+
+    # Recent activity section
+    st.markdown("---")
+    st.markdown("### Recent Activity")
+    activity_col1, activity_col2 = st.columns(2)
+
+    # Recent scraping runs
+    with activity_col1:
+        st.markdown("#### Recent Scraping Runs")
+        if connected:
+            try:
+                runs_coll = mongodb.get_collection(COLLECTION_SCRAPING_RUNS)
+                recent_runs = list(
+                    runs_coll.find({})
+                    .sort("started_at", -1)
+                    .limit(5)
+                )
+                for run in recent_runs:
+                    status = run.get("status", "unknown")
+                    run_id = run.get("run_id", "unknown")[:8]
+                    st.caption(f"• {status} • {run_id}")
+                if not recent_runs:
+                    st.caption("• No runs yet")
+            except Exception:
+                st.caption("• Unable to load runs")
+
+    # Recent product insertions
+    with activity_col2:
+        st.markdown("#### Recent Product Insertions")
+        if connected:
+            try:
+                products_coll = mongodb.get_collection(COLLECTION_PRODUCTS)
+                recent_products = list(
+                    products_coll.find({})
+                    .sort("_id", -1)
+                    .limit(5)
+                )
+                for prod in recent_products:
+                    an = prod.get("article_number", "N/A")[:8]
+                    st.caption(f"• {an} • {prod.get('product_name', '')[:20]}")
+                if not recent_products:
+                    st.caption("• No products yet")
+            except Exception:
+                st.caption("• Unable to load products")
 
 
 # ---------------------------------------------------------------------------
@@ -632,8 +832,7 @@ def main() -> None:
     elif page == "Data Quality":
         _render_data_quality(connected)
     elif page == "Excel Export":
-        st.subheader("Excel Export")
-        st.info("Excel export of up to 100 product records comes in Phase 2 / Phase 3.")
+        _render_excel_export(connected)
 
 
 if __name__ == "__main__":
