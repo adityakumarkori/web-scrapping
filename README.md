@@ -1,12 +1,19 @@
-# GRANIT EU Data Scraper - Phase 3 (Web Scraping Engine)
+# GRANIT EU Data Scraper - Phase 4 (Data Cleaning & Validation) + Phase 5 (MongoDB Persistence)
 
 Lightweight Python application for collecting approved product data for the
-GRANIT Parts EU dataset. Phase 1 established the project foundation
-(configuration, MongoDB connectivity, logging, exceptions, Streamlit shell).
-Phase 2 finalized the product data model, MongoDB collection architecture,
-data-source management and extraction metadata. Phase 3 implements a reusable
-web scraping engine that extracts product information from approved sources
-and returns structured product records.
+GRANIT Parts EU dataset.
+
+- **Phase 1**: Project foundation (configuration, MongoDB connectivity, logging,
+  exceptions, Streamlit shell).
+- **Phase 2**: Product data model, MongoDB collection architecture, data-source
+  management and extraction metadata.
+- **Phase 3**: Web scraping engine that extracts product information from approved
+  sources and returns structured product records.
+- **Phase 4**: Data cleaning, validation, deduplication and quality reporting
+  pipeline (text normalization, EAN/GTIN check digits, ISO code validation,
+  regional pricing validation, quality scoring, Streamlit Data Quality page).
+- **Phase 5**: MongoDB persistence layer (Atlas + local support, product/rejected/
+  run repositories, Decimal128 conversion).
 
 No live GRANIT website is accessed. All scraping is tested against local HTML
 fixtures and mocked HTTP responses.
@@ -228,18 +235,211 @@ python -m pytest
 ## Known Limitations
 
 - No actual scraping of the live GRANIT website is performed; all tests use
-  local fixtures and mocked HTTP responses.
+  local fixtures and mocked responses.
 - No Excel export or full product CRUD yet (deferred to later phases).
-- Product documents are not persisted to MongoDB in this phase; the
-  `ExtractionResult` is structured for handoff to a later persistence layer.
+- Product documents are not persisted to MongoDB in Phase 1–3; the
+  `ExtractionResult` is structured for handoff to Phase 5 persistence layer.
 - Streamlit `st.rerun()` is used in the Data Sources page; requires a live
   Streamlit session (not exercised by AppTest beyond startup/render).
 - Decimal monetary values are used in the Pydantic model; BSON conversion
-  for storage is handled at the persistence layer in a later phase.
+  for storage is handled by the `Decimal128` utility in Phase 5.
 - No Selenium, Playwright or browser automation is used.
 
-## Confirmation
+## Phase 5: MongoDB Persistence
 
-No unauthorized live GRANIT website scraping was performed. All scraping
-behavior is validated against local fixtures and mocked responses, and source
-authorization is enforced before any network access.
+### MongoDB Configuration
+
+Configuration is through environment variables in `.env`:
+
+```env
+MONGODB_URI=mongodb://localhost:27017
+MONGODB_DATABASE=granit_eu
+MONGODB_SERVER_SELECTION_TIMEOUT_MS=10000
+```
+
+For MongoDB Atlas:
+
+```env
+MONGODB_URI=mongodb+srv://<username>:<password>@<cluster-url>/
+MONGODB_DATABASE=granit_eu
+MONGODB_SERVER_SELECTION_TIMEOUT_MS=10000
+```
+
+- Support `mongodb://` (local) and `mongodb+srv://` (Atlas) connection strings.
+- Read configuration using the existing Pydantic Settings implementation
+  (`config.py`). Never hardcode credentials.
+- `.env.example` contains safe placeholders; never commit real credentials.
+- Special characters in usernames/passwords must be URL-encoded in the
+  connection string (e.g. `%23` for `#`, `%24` for `$).
+- TLS certificate verification is maintained for Atlas connections; never
+  disable verification.
+
+### Connection Manager (`core/database.py`)
+
+The `MongoDBManager` class provides:
+
+- **`connect()`** — Establishes connection, returns `True`/`False`. On failure
+  the application continues in offline mode (no crash).
+- **`disconnect()`** / **`close()`** — Releases the PyMongo client.
+- **`is_connected()`** — Returns `True` only when status is `CONNECTED`.
+- **`status_string()`** — Returns `"DISCONNECTED"`, `"CONNECTED"`, or
+  `"CONNECTION_ERROR"`.
+- **`get_database()`** / **`get_collection()`** — Raise
+  `DatabaseConnectionError` when not connected.
+- **`ping()`** — Verified via `admin.command("ping")` during connect.
+- **`initialize_collections()`** — Creates all five collections and
+  non-unique indexes (see below).
+- **Connection statuses**: `DISCONNECTED`, `CONNECTED`, `CONNECTION_ERROR`.
+  The application must distinguish these three states and not report
+  `CONNECTED` until the ping succeeds.
+
+Five collections are initialized:
+
+| Collection | Purpose |
+|---|---|
+| `products` | Validated product records |
+| `data_sources` | Approved and configured sources (preserved from Phase 2) |
+| `scraping_runs` | Scraping execution history |
+| `rejected_products` | Records rejected during validation |
+| `dataset_quality_reports` | Data quality summaries |
+
+**Suggested indexes:**
+
+- **products**: `{article_number: 1, source_id: 1}`, `{ean_gtin: 1, source_id: 1}`,
+  `{product_url: 1, source_id: 1}`, `{verification_status: 1, source_id: 1}`,
+  `{data_origin: 1, source_id: 1}`
+- **data_sources**: `{source_id: 1}` (unique), `{source_name: 1}`, `{source_url: 1}`
+- **scraping_runs**: `{run_id: 1}` (unique), `{source_id: 1}`, `{status: 1}`
+- **rejected_products**: `{source_id: 1, article_number: 1}`, `{rejected_at: -1}`
+- **dataset_quality_reports**: `{generated_at: -1}`, `{run_id: 1}`
+
+**Product identity / upsert strategy:**
+
+Products are identified by the composite key
+`{source_id, article_number}` together with `ean_gtin` where available. This
+allows the same article number to exist when it comes from different sources or
+manufacturers. The `ProductRepository.upsert_product()` method uses
+`{source_id, article_number}` (and `ean_gtin` if present) as the match criterion
+and `$set` to update matching records without overwriting the whole document.
+No global uniqueness constraint on `article_number` is created, because the
+same article number can be used by different manufacturers/sources.
+
+### Decimal128 Implementation
+
+MongoDB does not natively store Python `Decimal` objects. The following
+conversion pattern is used:
+
+- **Write**: `_apply_decimal128_forwrite()` recursively converts `Decimal`
+  values to `Decimal128` before inserting/updating documents.
+- **Read**: `_convert_decimal128_to_decimal()` recursively converts stored
+  `Decimal128` values back to Python `Decimal` after reading.
+
+This ensures that financial values (`net_price`, `gross_price`, `vat_rate`,
+`price`) retain their precision after save and read cycles. The conversion is
+applied recursively to `regional_data` arrays nested within product documents.
+
+### Product Repository (`repositories/product_repository.py`)
+
+Handles persistence of validated product records:
+
+- **`insert_product()`** — Insert a single product. Returns `inserted_id` or
+  `None` if a duplicate `{source_id, article_number}` already exists.
+- **`insert_many()`** — Insert multiple products. Handles batch deduplication
+  and partial failures (`ordered=False`).
+- **`get_by_id()`** — Retrieve by MongoDB `_id`. Converts `Decimal128` → `Decimal`.
+- **`get_by_article_number()`** — Retrieve by article number, optionally
+  filtered by `source_id`. Returns a list (same article number across sources).
+- **`get_by_gtin()`** — Retrieve by EAN/GTIN barcode.
+- **`get_by_source()`** — Retrieve all products from a given source.
+- **`get_all()`** — Retrieve all product records.
+- **`upsert_product()`** — Upsert using `{source_id, article_number}` match
+  criterion with `$set` update.
+- **`update_product()`** — Update specific fields by `_id`.
+- **`delete_product()`** — Delete by `_id`.
+- **`count_products()`** — Total count.
+- **`get_statistics()`** — Aggregate stats (distribution by `data_origin`,
+  `verification_status`, counts with/without `regional_data`).
+
+### Scraping Run Repository (`repositories/scraping_run_repository.py`)
+
+Persists scraping execution information:
+
+- **`create_run()`** — Create a new run record.
+- **`update_run()`** — Update run status and counts.
+- **`get_run_by_id()`** — Retrieve by `run_id`.
+- **`get_recent_runs()`** — Most recent runs, ordered newest first.
+- **`get_runs_by_source()`** — Runs for a given source.
+- **`count_runs()`** / **`count_runs_by_status()`** — Count operations.
+
+### Rejected Product Repository (`repositories/rejected_product_repository.py`)
+
+Stores rejected records separately with:
+
+- Original extracted data, source ID and URL.
+- Article number (if available).
+- Validation errors and rejection reason.
+- Rejected timestamp.
+- Associated scraping run ID.
+- Never marks synthetic/verified records as verified.
+
+### Pipeline Integration
+
+The Phase 4 pipeline is integrated with MongoDB persistence via
+``run_pipeline_with_persistence()``:
+
+1. Check that MongoDB is connected before persistence.
+2. Validate source authorization before scraping.
+3. Run the existing extraction pipeline (cleaning → validation → deduplication → quality report).
+4. Separate valid and rejected records.
+5. Persist valid records using `ProductRepository` (insert or upsert).
+6. Persist rejected records with validation errors using
+   `RejectedProductRepository`.
+7. Save scraping execution statistics using `ScrapingRunRepository`.
+8. Return a structured execution summary with `persistence_status`:
+   `"persisted"`, `"partial"`, or `"unavailable"`.
+
+If MongoDB is disconnected:
+
+- The pipeline still runs correctly and returns results.
+- No records are claimed to have been saved.
+- `persistence_status` is set to `"unavailable"`.
+- The Streamlit application continues to run in offline mode.
+- Users can retry persistence after reconnecting; no automatic retry that
+  creates duplicates is performed.
+
+### Test Coverage
+
+Dedicated tests exist for:
+
+- MongoDB configuration (local URI, Atlas URI, missing URI behavior).
+- Connection success and failure.
+- Ping verification.
+- Collection initialization and index creation.
+- Product insertion, bulk insertion, upsert.
+- Duplicate handling (same `{source_id, article_number}`).
+- Product retrieval (by ID, article number, GTIN, source).
+- Product updates.
+- Decimal128 conversion and round-trip precision.
+- Regional pricing persistence.
+- Rejected product persistence.
+- Scraping run persistence.
+- Pipeline integration (cleaning → validation → persistence).
+- Disconnected database behavior (no crash, clear status).
+
+Use mocked MongoDB clients for normal automated tests. Optional integration
+tests can be activated when a dedicated test MongoDB URI is configured via
+the `TEST_MONGODB_URI` environment variable. Never run destructive integration
+tests against the production database.
+
+### Documentation
+
+- How to run local MongoDB (`mongod --dbpath <path>`).
+- How to configure MongoDB Atlas (connection string, IP whitelist).
+- How to configure `.env` (safe placeholders, never real credentials).
+- How to test the database connection (`python -m pytest tests/test_database.py`).
+- How collections are initialized (indexes, no global uniqueness).
+- How product upserts work (composite key `{source_id, article_number}`).
+- How to run database tests.
+- How to switch between local MongoDB and Atlas (change `MONGODB_URI` in `.env`).
+
+Examples are included but never include real credentials.
