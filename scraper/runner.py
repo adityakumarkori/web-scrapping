@@ -133,6 +133,15 @@ class ScrapingRunner:
             result.completed_at = datetime.now(timezone.utc)
             return result
 
+        # ---- Domain restriction: start URL must match the approved source domain ----
+        if start_hostname and start_hostname.lower() != source_domain.lower():
+            result.status = "failed"
+            result.errors.append(
+                f"Start URL domain {start_hostname!r} does not match approved source domain {source_domain!r}"
+            )
+            result.completed_at = datetime.now(timezone.utc)
+            return result
+
         try:
             self._extract_catalogue(
                 result, start_url, source_domain, max_records, data_origin
@@ -258,6 +267,15 @@ class ScrapingRunner:
                     break
                 try:
                     data = extract_from_json_ld(pj, base_url=page_url)
+                    # SSRF protection: validate product_url and image_urls
+                    if data.get("product_url"):
+                        data["product_url"] = self._validate_product_url(
+                            data["product_url"], source_domain
+                        )
+                    if data.get("image_urls"):
+                        data["image_urls"] = self._validate_image_urls(
+                            data["image_urls"], source_domain
+                        )
                     product = build_product(
                         data, result.source_id, result.source_url, data_origin
                     )
@@ -277,6 +295,11 @@ class ScrapingRunner:
                 data.update(extract_from_metadata(soup, base_url=page_url))
                 data.update(extract_visible_content(soup, base_url=page_url))
                 data["product_url"] = data.get("product_url") or page_url
+                # SSRF protection on fallback product_url
+                if data.get("product_url"):
+                    data["product_url"] = self._validate_product_url(
+                        data["product_url"], source_domain
+                    )
                 product = build_product(
                     data, result.source_id, result.source_url, data_origin
                 )
@@ -291,3 +314,22 @@ class ScrapingRunner:
                 result.errors.append(f"Failed product on {page_url}: {exc}")
 
         return found_on_page
+
+    def _validate_product_url(self, url: str, allowed_domain: str) -> str:
+        """Validate a product URL for scheme and domain restrictions."""
+        validated = self.http_client._validate_url(url, allowed_domain=allowed_domain)
+        return validated
+
+    def _validate_image_urls(self, image_urls: List[str], allowed_domain: str) -> Optional[List[str]]:
+        """Validate all image URLs for scheme and domain restrictions."""
+        if not image_urls:
+            return None
+        valid_urls: List[str] = []
+        for url in image_urls:
+            try:
+                validated = self.http_client._validate_url(url, allowed_domain=allowed_domain)
+                valid_urls.append(validated)
+            except SourceAccessError:
+                # Skip insecure/off-domain image URLs
+                continue
+        return valid_urls or None
