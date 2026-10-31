@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     # MongoDB
     mongodb_uri: str = Field(default="mongodb://localhost:27017")
     mongodb_database: str = Field(default="granit_eu")
+    mongodb_server_selection_timeout_ms: int = Field(default=10000, ge=1000)
 
     # Logging
     log_level: str = Field(default="INFO")

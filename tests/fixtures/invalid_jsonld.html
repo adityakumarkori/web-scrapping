@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html>
+<head><title>Invalid JSON-LD</title></head>
+<body>
+<script type="application/ld+json">
+{ "not valid json": }
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org/",
+  "@type": "Product",
+  "name": "Broken Product"
+}
+</script>
+</body>
+</html>

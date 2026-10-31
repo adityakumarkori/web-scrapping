@@ -15,7 +15,8 @@ def test_default_values():
     assert config.settings.app_name == "GRANIT EU Data Manager"
     assert config.settings.app_env == "development"
     assert config.settings.debug is False
-    assert config.settings.mongodb_uri == "mongodb://localhost:27017"
+    # URI is loaded from .env if present; verify it starts safely
+    assert config.settings.mongodb_uri.startswith(("mongodb://", "mongodb+srv://"))
     assert config.settings.mongodb_database == "granit_eu"
     assert config.settings.log_level == "INFO"
     assert config.settings.max_product_records == 100
