@@ -17,6 +17,7 @@ from config import settings
 from core.database import (
     COLLECTION_DATA_SOURCES,
     COLLECTION_PRODUCTS,
+    COLLECTION_REJECTED_PRODUCTS,
     COLLECTION_SCRAPING_RUNS,
     mongodb,
 )
