@@ -841,10 +841,60 @@ def _render_excel_export(connected: bool) -> None:
     st.subheader("Excel Export")
     st.caption("Export product data to Excel format.")
 
+    from exporters.excel_exporter import export_granit_eu, export_blinkit_bengaluru
+
     if not connected:
         st.error("MongoDB is unavailable. Export requires a MongoDB connection.")
     else:
-        st.info("Excel export functionality comes in a later phase.")
+        # Fetch products from MongoDB
+        try:
+            products_collection = mongodb.get_collection(COLLECTION_PRODUCTS)
+            products = list(products_collection.find())
+            # Convert ObjectId to string for JSON serialization
+            for p in products:
+                if "_id" in p:
+                    p["_id"] = str(p["_id"])
+        except Exception as exc:
+            st.error(f"Failed to fetch products from MongoDB: {exc}")
+            products = []
+
+        if not products:
+            st.info("No products found in MongoDB. Scrape products first or upload a file.")
+        else:
+            st.success(f"Found {len(products)} products in MongoDB")
+
+            # Export options
+            col1, col2 = st.columns(2)
+
+            with col1:
+                if st.button("Export GRANIT EU Excel", type="primary", use_container_width=True):
+                    with st.spinner("Generating GRANIT EU Excel workbook..."):
+                        try:
+                            buf = export_granit_eu(products)
+                            st.download_button(
+                                label="Download GRANIT EU Excel",
+                                data=buf.getvalue(),
+                                file_name="GRANIT_Parts_EU_Sample_Dataset.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                use_container_width=True,
+                            )
+                        except Exception as e:
+                            st.error(f"GRANIT EU export failed: {e}")
+
+            with col2:
+                if st.button("Export Blinkit Bengaluru Excel", type="secondary", use_container_width=True):
+                    with st.spinner("Generating Blinkit Bengaluru Excel workbook..."):
+                        try:
+                            buf = export_blinkit_bengaluru(products)
+                            st.download_button(
+                                label="Download Blinkit Bengaluru Excel",
+                                data=buf.getvalue(),
+                                file_name="Blinkit_Bengaluru_Sample_Dataset.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                use_container_width=True,
+                            )
+                        except Exception as e:
+                            st.error(f"Blinkit export failed: {e}")
 
 
 if __name__ == "__main__":
