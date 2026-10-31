@@ -226,7 +226,7 @@ class ScrapingRunner:
                 continue
 
             extracted = self._extract_products_from_page(
-                soup, response.url, result, data_origin
+                soup, response.url, result, data_origin, source_domain
             )
             result.records_found += extracted
 
@@ -255,6 +255,7 @@ class ScrapingRunner:
         page_url: str,
         result: ExtractionResult,
         data_origin: str,
+        source_domain: str,
     ) -> int:
         """Extract products from a single page. Returns count found on page."""
         found_on_page = 0
